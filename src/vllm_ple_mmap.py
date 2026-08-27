@@ -173,6 +173,7 @@ class MmapPleTable:
             start = mm.offset
             end = start + mm.shape[0] * mm.shape[1]
             with open(path, "rb", buffering=0) as f:
+                f.seek(start)
                 pos = start
                 while pos < end:
                     n = f.readinto(bytearray(min(block, end - pos)))  # noqa: F841

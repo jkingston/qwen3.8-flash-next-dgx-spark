@@ -7,36 +7,37 @@
 #   docker logs -f qwen38-flash      # wait for "Application startup complete"
 #
 # Tunables (env):
-#   PORT=18300        host port for the API
-#   CTX=32768         max context length (native 262144; raises KV cost)
-#   SEQS=2            max concurrent sequences
-#   GPU_MEM=0.78      fraction of the 128 GB pool for weights+KV (leave OOM margin)
+#   PORT=18083        host port for the dgxspark unified API
+#   CTX=131072        max context length per lane
+#   SEQS=8            maximum concurrent sequences
+#   GPU_MEM=0.85      candidate eight-lane memory target
 #   MTP=0             speculative tokens (2-3 = the model's MTP head; ~1.6x decode)
 #   PREWARM=0         1 = stream the 48 GiB table once at boot to warm the page cache
 #   IMAGE=qwen38-flash-dgx
 #   MODEL=RadixArk/Qwen3.8-Flash-Next-NVFP4
 set -euo pipefail
 
-NAME="${NAME:-qwen38-flash}"
-IMAGE="${IMAGE:-qwen38-flash-dgx}"
+NAME="${NAME:-qwen38-flash-next}"
+IMAGE="${IMAGE:-qwen38-flash-dgx:82ed48d}"
 MODEL="${MODEL:-RadixArk/Qwen3.8-Flash-Next-NVFP4}"
+REVISION="${REVISION:-7b719225242aacd3dbd3f9407468c2ee9a9d2594}"
 HF_CACHE="${HF_CACHE:-$HOME/.cache/huggingface}"
-PORT="${PORT:-18300}"
-CTX="${CTX:-32768}"
-SEQS="${SEQS:-2}"
-GPU_MEM="${GPU_MEM:-0.78}"
+PORT="${PORT:-18083}"
+CTX="${CTX:-131072}"
+SEQS="${SEQS:-8}"
+GPU_MEM="${GPU_MEM:-0.85}"
 MTP="${MTP:-0}"
 PREWARM="${PREWARM:-0}"
 
 # Resolve the local snapshot directory and map it to the in-container mount.
 REPO_DIR="$HF_CACHE/hub/models--${MODEL//\//--}"
-SNAP_HOST="$(ls -d "$REPO_DIR"/snapshots/*/ 2>/dev/null | head -1 || true)"
-if [ -z "$SNAP_HOST" ]; then
+SNAP_HOST="$REPO_DIR/snapshots/$REVISION"
+if [ ! -d "$SNAP_HOST" ]; then
   echo "!! checkpoint not found under $REPO_DIR"
   echo "   run scripts/download-weights.sh first."
   exit 1
 fi
-SNAP_IN="/hf/hub/models--${MODEL//\//--}/snapshots/$(basename "$SNAP_HOST")"
+SNAP_IN="/hf/hub/models--${MODEL//\//--}/snapshots/$REVISION"
 
 # The PLE gather is a CPU op + a pageable host->device copy: it MUST run outside
 # CUDA graphs. We declare it a splitting op and use PIECEWISE capture (never FULL*).

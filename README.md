@@ -1,5 +1,17 @@
 # Qwen3.8-Flash-Next on a single DGX Spark (GB10)
 
+This repository is the pinned model-runtime submodule for the private
+`dgxspark` deployment. Its production entry point is
+`runtime/run-vllm.sh`, which serves `qwen3.8-flash-next` on loopback port
+`18083` for the unified API.
+
+Production defaults are 131,072 tokens per request, eight concurrent lanes,
+no MTP drafting, and a 0.85 GPU-memory target. The eight-lane profile is being
+validated at full aggregate context before promotion; the previously validated
+safe profile is four lanes at 0.78. MTP remains useful for one decode-heavy
+interactive stream but lost to target-only serving on long-context concurrent
+workloads.
+
 Run **Qwen3.8-Flash-Next** — a ~176B-parameter model (125B main + 51B n-gram, 6B
 active) — on **one NVIDIA DGX Spark / ASUS GX10** with **vLLM**, at full prefill
 speed and with MTP speculative decoding.
@@ -41,8 +53,8 @@ kernels.*
 ## Quickstart
 
 ```bash
-git clone https://github.com/blazux/qwen3.8-Flash-DGX.git
-cd qwen3.8-Flash-DGX
+git clone https://github.com/jkingston/qwen3.8-flash-next-dgx-spark.git
+cd qwen3.8-flash-next-dgx-spark
 
 docker build -t qwen38-flash-dgx .        # ~1 min: official image + one patch
 scripts/download-weights.sh               # ~122 GiB, resumable (one-time)
