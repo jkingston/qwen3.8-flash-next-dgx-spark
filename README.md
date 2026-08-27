@@ -6,11 +6,11 @@ This repository is the pinned model-runtime submodule for the private
 `18083` for the unified API.
 
 Production defaults are 131,072 tokens per request, eight concurrent lanes,
-no MTP drafting, and a 0.85 GPU-memory target. The eight-lane profile is being
-validated at full aggregate context before promotion; the previously validated
-safe profile is four lanes at 0.78. MTP remains useful for one decode-heavy
-interactive stream but lost to target-only serving on long-context concurrent
-workloads.
+no MTP drafting, and a 0.85 GPU-memory target. Eight simultaneous 125,009-token
+prompts passed with 1,000,072 aggregate prompt tokens, 2,417 prompt tok/s, zero
+preemptions, and 7.7 GiB unified memory still available after the test. MTP
+remains useful for one decode-heavy interactive stream but lost to target-only
+serving on long-context concurrent workloads.
 
 Run **Qwen3.8-Flash-Next** — a ~176B-parameter model (125B main + 51B n-gram, 6B
 active) — on **one NVIDIA DGX Spark / ASUS GX10** with **vLLM**, at full prefill
