@@ -34,13 +34,30 @@ guard enabled; temperature monitoring is observational, not an added cutoff.
 ## Reuse the deployed profile
 
 [profiles/ultrafast-production-create.json](profiles/ultrafast-production-create.json)
-contains the exact Docker create arguments, without credentials. Host paths
-intentionally match Spark. Required assets:
+contains the deployed Docker settings with portable host-path placeholders.
+The launcher resolves these environment variables, defaulting to the current
+user's home directory:
 
-- `/home/jackk/models/Qwen3.8-Flash-Next-W4A16-AutoRound-hybrid-mtpdense-g32`
-- `/home/jackk/models/ple-table-fp8`
-- `/home/jackk/.cache/qwen38-v16b/draft-vocab-ids-K65536.txt`
-- Local image `sha256:ba63307007a14b9c05185cdcdda07c7dc075551c0d96c029950fb8d27254e6a8`
+| Variable | Default |
+|---|---|
+| `MODEL_DIR` | `~/models/Qwen3.8-Flash-Next-W4A16-AutoRound-hybrid-mtpdense-g32` |
+| `PLE_DIR` | `~/models/ple-table-fp8` |
+| `DRAFT_VOCAB_FILE` | `~/.cache/qwen38-v16b/draft-vocab-ids-K65536.txt` |
+
+Override them for your storage layout; spaces and relative paths are supported.
+Tildes are expanded by the launcher. Colons and newlines are rejected because
+Docker bind-volume syntax cannot represent them safely here. No shell evaluation
+is performed, and the launcher does not read `.env` files automatically.
+
+```bash
+export MODEL_DIR="/srv/models/Qwen3.8-Flash-Next-W4A16-AutoRound-hybrid-mtpdense-g32"
+export PLE_DIR="/srv/models/ple-table-fp8"
+export DRAFT_VOCAB_FILE="/srv/models/draft-vocab-ids-K65536.txt"
+python3 runtime/production.py --dry-run
+```
+
+The pinned local image is
+`sha256:ba63307007a14b9c05185cdcdda07c7dc075551c0d96c029950fb8d27254e6a8`.
 
 That SHA is a **local image ID, not a pullable registry digest**.
 UltraFast source observed at promotion:
@@ -87,7 +104,8 @@ does not establish perfect agent reliability or full-context reasoning quality.
 
 Spark retains stopped container `qwen38-base-rollback-20261007`.
 The deployed idle-checked rollback script is
-`/home/jackk/dgxspark/qwen3.8-flash-dgx/scripts/rollback-retention6400.sh`.
+`scripts/rollback-retention6400.sh` under the model directory in the separate
+`dgxspark` deployment checkout (not included in this repository).
 Preserve the base container and checkpoints while evaluating production.
 
 Previous documentation is in [docs/LEGACY-NVFP4.md](docs/LEGACY-NVFP4.md);

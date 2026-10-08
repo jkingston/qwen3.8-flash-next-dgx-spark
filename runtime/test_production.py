@@ -1,6 +1,7 @@
 import contextlib
 import io
 import json
+from pathlib import Path
 import subprocess
 import unittest
 from unittest.mock import patch
@@ -9,6 +10,33 @@ import production
 
 
 class ProductionTests(unittest.TestCase):
+    def test_defaults_follow_current_user_home(self):
+        with patch.dict('os.environ', {}, clear=True), patch('production.Path.home', return_value=Path('/tmp/example-user')):
+            argv = production.resolve_manifest()
+        self.assertIn('/tmp/example-user/models/ple-table-fp8:/ple-table:ro', argv)
+        self.assertIn('/tmp/example-user/.cache/qwen38-v16b/draft-vocab-ids-K65536.txt:/draft-vocab/ids.txt:ro', argv)
+
+    def test_overrides_remain_single_arguments(self):
+        env = {'MODEL_DIR': '/tmp/models with spaces', 'PLE_DIR': '/tmp/$(not-a-command)', 'DRAFT_VOCAB_FILE': 'draft.txt'}
+        with patch.dict('os.environ', env, clear=True):
+            argv = production.resolve_manifest()
+        self.assertIn('/tmp/models with spaces:/model:ro', argv)
+        self.assertIn('/tmp/$(not-a-command):/ple-table:ro', argv)
+        self.assertIn(str(Path('draft.txt').resolve()) + ':/draft-vocab/ids.txt:ro', argv)
+
+    def test_invalid_volume_paths_are_rejected(self):
+        for value in ['', ' ', '/tmp/path:rw', '/tmp/path\nother']:
+            with self.subTest(value=value), patch.dict('os.environ', {'MODEL_DIR': value}):
+                with self.assertRaisesRegex(SystemExit, 'MODEL_DIR'):
+                    production.resolve_manifest()
+
+    def test_only_mount_paths_change(self):
+        original = json.loads(production.MANIFEST.read_text())
+        resolved = production.resolve_manifest()
+        changes = [(old, new) for old, new in zip(original, resolved) if old != new]
+        self.assertEqual(len(changes), 3)
+        self.assertTrue(all(old.startswith('${') and new.endswith(':ro') for old, new in changes))
+
     def test_dry_run_never_contacts_docker(self):
         with patch('sys.argv', ['production.py', '--dry-run']), patch('production.subprocess.run') as run, contextlib.redirect_stdout(io.StringIO()) as out:
             production.main()
