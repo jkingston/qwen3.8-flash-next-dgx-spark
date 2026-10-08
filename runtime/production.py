@@ -7,6 +7,7 @@ from pathlib import Path
 import shlex
 import subprocess
 from string import Template
+from assets import ensure_assets
 
 MANIFEST = Path(__file__).resolve().parents[1] / 'profiles/ultrafast-production-create.json'
 
@@ -35,6 +36,7 @@ def main():
     mode.add_argument('--dry-run', action='store_true')
     mode.add_argument('--create', action='store_true')
     mode.add_argument('--run', action='store_true')
+    parser.add_argument('--no-download', action='store_true', help='Fail if any required asset is missing or incomplete')
     args = parser.parse_args()
     argv = resolve_manifest()
     name = argv[argv.index('--name') + 1]
@@ -46,14 +48,16 @@ def main():
     existing = subprocess.run(['docker', 'container', 'ls', '-a', '--format', '{{.Names}}'], check=True, capture_output=True, text=True)
     if name in existing.stdout.splitlines():
         raise SystemExit(f'Container {name} already exists; refusing replacement or restart')
+    image = next(x for x in argv if x.startswith('sha256:'))
+    # Fail before large downloads when the required helper/serving image is absent.
+    subprocess.run(['docker', 'image', 'inspect', image], check=True, stdout=subprocess.DEVNULL)
+    mounts = {}
     for i, value in enumerate(argv):
         if value == '-v':
-            host = Path(argv[i + 1].split(':', 1)[0])
-            expected_file = argv[i + 1].endswith(':/draft-vocab/ids.txt:ro')
-            if not (host.is_file() if expected_file else host.is_dir()):
-                raise SystemExit(f'Required asset missing: {host}')
-    image = next(x for x in argv if x.startswith('sha256:'))
-    subprocess.run(['docker', 'image', 'inspect', image], check=True, stdout=subprocess.DEVNULL)
+            host, container, _ = argv[i + 1].split(':')
+            mounts[container] = Path(host)
+    ensure_assets(mounts['/model'], mounts['/ple-table'], mounts['/draft-vocab/ids.txt'],
+                  image, offline=args.no_download)
     subprocess.run(argv, check=True)
     if args.run:
         subprocess.run(['docker', 'start', '--attach', name], check=True)

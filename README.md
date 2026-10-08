@@ -72,11 +72,47 @@ Inspect without touching Docker:
 python3 runtime/production.py --dry-run
 ```
 
-On an idle machine with those assets installed, create the container:
+Install the downloader dependency in your Python environment first:
+
+```bash
+python3 -m pip install huggingface_hub
+```
+
+On an idle machine with the pinned Docker image installed, create the container:
 
 ```bash
 python3 runtime/production.py --create
 ```
+
+Missing assets are now downloaded automatically. The production model is a
+**derived checkpoint**, so the launcher downloads the base and runs the pinned
+upstream dense-MTP g32 conversion and verification before publishing the model
+directory. It also downloads the PLE table and installs the exact SHA256-checked
+draft vocabulary. Sources:
+
+- Base: `Saren/Qwen3.8-Flash-Next-W4A16-AutoRound-hybrid`
+  at `8b82f0b7abe3d1150a7827d298c75e86267636ae`.
+- PLE: `Saren/Qwen3.8-Flash-Next-ple-table-fp8`
+  at `50511b0a41aa1d34b8beb7e5d4bb06a0b650dc14`.
+- Builder/vocabulary: the UltraFast recipe commit linked above, not mutable main.
+
+Allow approximately 130 GB for public downloads plus 5 GB for the converted
+shard and additional space for Docker. The base is kept beside `MODEL_DIR` in
+`.qwen38-base-<revision>`; unchanged shards are hardlinked, not duplicated.
+Requires Git, Bash, GNU coreutils and the existing pinned image. The conversion
+helper is CPU-only, network-disabled and limited to 8 GiB. Source downloads
+are resumable through Hugging Face's local metadata. Existing complete assets
+need no network. Gated access, if required, uses your normal HF authentication;
+model license terms still apply.
+
+Safetensors headers/sizes, indexed shards and the conversion report are checked;
+these are completeness checks, not a full rehash of every tensor at each launch.
+The upstream builder additionally checks its pinned source index/extra-shard hashes
+and verifies the conversion. Incomplete existing derived model directories and
+unexpected draft vocabularies are preserved and rejected, not overwritten.
+Failed build directories and fetched recipe checkouts remain for diagnosis.
+Missing PLE shards can be resumed. `--no-download` disables network preparation;
+`--dry-run` performs no downloads or Docker calls.
 
 Or create and serve in the foreground with `bash runtime/run-vllm.sh`.
 Both refuse to overwrite an existing container. **Do not run these on the live
