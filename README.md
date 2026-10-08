@@ -1,144 +1,95 @@
-# Qwen3.8-Flash-Next on a single DGX Spark (GB10)
+# Qwen3.8-Flash-Next on DGX Spark
 
-This repository is the pinned model-runtime submodule for the private
-`dgxspark` deployment. Its production entry point is
-`runtime/run-vllm.sh`, which serves `qwen3.8-flash-next` on loopback port
-`18083` for the unified API.
+Production configuration promoted on 2026-10-07: **UltraFast W4A16 + MTP3**.
+Public model ID remains `qwen3.8-flash-next`. Direct serving is loopback-only
+on port 18300; the existing unified API provides authentication and routing.
 
-Production defaults are 131,072 tokens per request, eight concurrent lanes,
-no MTP drafting, and a 0.85 GPU-memory target. Eight simultaneous 125,009-token
-prompts passed with 1,000,072 aggregate prompt tokens, 2,417 prompt tok/s, zero
-preemptions, and 7.7 GiB unified memory still available after the test. MTP
-remains useful for one decode-heavy interactive stream but lost to target-only
-serving on long-context concurrent workloads.
+## Selected configuration
 
-Run **Qwen3.8-Flash-Next** — a ~176B-parameter model (125B main + 51B n-gram, 6B
-active) — on **one NVIDIA DGX Spark / ASUS GX10** with **vLLM**, at full prefill
-speed and with MTP speculative decoding.
+| Setting | Production |
+|---|---|
+| Checkpoint | W4A16 AutoRound experts, FP8 side layers, INT8 lm_head, dense int4 MTP |
+| Image | `qwen38-flash-dgx:iter6d-20260910`, pinned by local SHA256 in manifest |
+| Engine | `v0.1.dev20073+g8e685d198` with UltraFast recipe patches |
+| Loader | Standard `safetensors`, not tensorizer |
+| Context / lanes | 262144 maximum per request / 4 schedulable requests |
+| KV allocation | `22g` = 22,000,000,000 bytes; BF16 via `auto` |
+| SSM | Image default FP32 |
+| Speculation | MTP3, 65536-token draft vocabulary, block rejection / probabilistic draft |
+| Prefix caching | Enabled; retention interval 6400 |
+| Prefill | Chunked, 4096 batched tokens |
+| PLE | Mapped FP8 table, prewarm and prefetch off |
+| Graphs | PIECEWISE with the manifest's splitting operations |
+| Parsers | `qwen3_xml` tools, `qwen3` reasoning |
+| Agent thinking | Native `medium` in tested requests; not a server-enforced default |
 
-The catch this repo solves: the NVFP4 checkpoint is **122 GiB**, which does not fit
-next to a usable KV cache in the Spark's **128 GB unified pool**. 44 GiB of that is
-the n-gram embedding ("PLE") table — a pure lookup that a token only touches 16 rows
-of. This repo adds one patch to the official vLLM image that **serves that table from
-NVMe via `mmap`** instead of keeping it resident. Weights drop to **~76 GiB**, the
-rest of the pool goes to KV, and everything runs on stock GB10 kernels.
+The explicit KV allocation overrides `--gpu-memory-utilization 0.01`: this
+is **not a 1% total-memory configuration**. Captured argv contains 8192 and then
+4096 for batched tokens; the latter is effective. We preserve deployed argv.
 
-The result, versus the llama.cpp GGUF that was the only working option on a Spark
-before: **~5× faster prefill, and MTP (which the GGUF cannot do).**
+Four simultaneous ~128K windows passed retrieval/cache tests. **Four full
+262K windows are not qualified or guaranteed.** Keep the existing 12 GiB memory
+guard enabled; temperature monitoring is observational, not an added cutoff.
 
-| | llama.cpp IQ4_XS | **this repo (vLLM NVFP4)** |
-|---|---|---|
-| Prefill | ~540 tok/s | **~2,400–2,660 tok/s** |
-| Decode (no speculation) | ~22 tok/s | ~17 tok/s |
-| Decode **+ MTP=2** | not supported | **~27 tok/s** (≈67% accept) |
-| Resident GPU memory | ~94 GiB (GGUF) | ~76 GiB weights + KV |
-| N-gram table | mmap (built in) | **mmap from NVMe (this patch)** |
+## Reuse the deployed profile
 
-*Measured on an ASUS GX10 (GB10, 128 GB), single request, ctx 32k. Prefill is the
-headline: Flash-Next's whole point is its sparse attention (QSA), and llama.cpp has
-no QSA kernel — it runs dense, so its prefill is its weakest axis. vLLM uses the real
-kernels.*
+[profiles/ultrafast-production-create.json](profiles/ultrafast-production-create.json)
+contains the exact Docker create arguments, without credentials. Host paths
+intentionally match Spark. Required assets:
 
----
+- `/home/jackk/models/Qwen3.8-Flash-Next-W4A16-AutoRound-hybrid-mtpdense-g32`
+- `/home/jackk/models/ple-table-fp8`
+- `/home/jackk/.cache/qwen38-v16b/draft-vocab-ids-K65536.txt`
+- Local image `sha256:ba63307007a14b9c05185cdcdda07c7dc075551c0d96c029950fb8d27254e6a8`
 
-## Requirements
+That SHA is a **local image ID, not a pullable registry digest**.
+UltraFast source observed at promotion:
+[dime-online/qwen3.8-Flash-DGX-UltraFast](https://github.com/dime-online/qwen3.8-Flash-DGX-UltraFast/tree/0c391a3e74b6a775cfe248691ca7fd855b1876a5).
+The recipe revision alone does not establish full image/checkpoint build provenance.
+The root Dockerfile and preparation scripts are the **historical NVFP4 build**,
+not instructions to rebuild this UltraFast image or checkpoint.
 
-- An **NVIDIA DGX Spark or compatible GB10 (sm_121)** box, 128 GB unified memory,
-  aarch64, recent NVIDIA driver, Docker with the NVIDIA container runtime.
-- **~130 GB free disk** for the checkpoint, on reasonably fast storage (the table is
-  read from it at runtime — NVMe strongly recommended; the Spark's onboard NVMe is ideal).
-- The base image is multi-arch, so `docker build` also works on x86 Blackwell
-  (sm_120, e.g. RTX PRO 6000) for testing, though this is tuned for the Spark.
-
-## Quickstart
-
-```bash
-git clone https://github.com/jkingston/qwen3.8-flash-next-dgx-spark.git
-cd qwen3.8-flash-next-dgx-spark
-
-docker build -t qwen38-flash-dgx .        # ~1 min: official image + one patch
-scripts/download-weights.sh               # ~122 GiB, resumable (one-time)
-scripts/serve.sh                          # boots on :18300 (~8 min to load)
-docker logs -f qwen38-flash               # wait for "Application startup complete"
-scripts/smoke-test.sh                     # health + coherence + prefill/decode numbers
-```
-
-Then hit the OpenAI-compatible API:
+Inspect without touching Docker:
 
 ```bash
-curl http://localhost:18300/v1/chat/completions -H 'Content-Type: application/json' -d '{
-  "model": "qwen3.8-flash-next",
-  "messages": [{"role":"user","content":"Write a haiku about a desktop supercomputer."}],
-  "max_tokens": 512
-}'
+python3 runtime/production.py --dry-run
 ```
 
-Turn on MTP speculative decoding and a longer context:
+On an idle machine with those assets installed, create the container:
 
 ```bash
-MTP=2 CTX=65536 scripts/serve.sh
+python3 runtime/production.py --create
 ```
 
-## Tuning (env vars for `scripts/serve.sh`)
+Or create and serve in the foreground with `bash runtime/run-vllm.sh`.
+Both refuse to overwrite an existing container. **Do not run these on the live
+Spark just to update documentation**: its production container already exists.
+Its systemd service uses `docker start --attach qwen38-flash`, with
+`docker stop --timeout 45 qwen38-flash` on shutdown and a 20-minute startup timeout.
+Keep the existing service and memory guard; no service changes are needed.
 
-| Var | Default | Notes |
-|---|---|---|
-| `PORT` | `18300` | API port |
-| `CTX` | `32768` | Max context (native 262144; KV grows with it) |
-| `SEQS` | `2` | Max concurrent sequences |
-| `GPU_MEM` | `0.78` | Fraction of the 128 GB pool for weights+KV. Keep headroom — on a Spark the OS and the GPU share this pool, and an OOM there can freeze the box. |
-| `MTP` | `0` | Speculative tokens from the model's MTP head. `2`–`3` gives ~1.6× decode at ~67% accept. |
-| `PREWARM` | `0` | `1` streams the 48 GiB table once at boot to warm the page cache — steadier first-request latency, ~10 s extra startup. |
-| `WORKERS` | `32` | Threads used for the mmap gather. |
+## Evidence and limitations
 
-## How it fits — the one idea
+Real usage through 2026-10-08 11:38 UTC: 82 token-accounted OpenCode requests
+versus 260 on October 1. Median full-request latency 14.7 -> 8.7 seconds,
+p90 55.4 -> 43.6 seconds, median effective output rate 25.3 -> 44.4 tok/s,
+with median input 65K -> 117K. Effective rate includes waiting/prefill, not
+pure decode. All 83 post-promotion gateway records were HTTP200; one lacked
+token usage and is not proven complete. Thinking settings, concurrency and
+tasks differ: observational evidence, not a causal A/B or quality result.
 
-A token's n-gram lookup reads **16 rows × 160 bytes ≈ 2.5 KB**. Over a 20k-token
-prefill that's ~1.3 GB of small reads — under a second on NVMe, and the hot n-grams
-stay in the page cache. So the 44 GiB table never needs to be in the unified pool:
-we `mmap` the checkpoint's `model-plefp8-*.safetensors` shards and gather rows on
-demand. Nothing else about the model changes — the hashing, dequant, and the sparse
-attention all run stock.
+Qualification included four ~128K cached lanes without preemption and a
+49-minute mixed Pi/OpenCode soak (21/24 tasks, no API errors or preemptions).
+Generated-test hangs and correctness failures remain possible. Promotion
+does not establish perfect agent reliability or full-context reasoning quality.
 
-Full details, including the three GB10-specific bugs this works around, are in
-[docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md).
+## Rollback and historical recipe
 
-## What's in here
+Spark retains stopped container `qwen38-base-rollback-20261007`.
+The deployed idle-checked rollback script is
+`/home/jackk/dgxspark/qwen3.8-flash-dgx/scripts/rollback-retention6400.sh`.
+Preserve the base container and checkpoints while evaluating production.
 
-```
-Dockerfile                 official vLLM Flash-Next image + the patch
-src/vllm_ple_mmap.py       the patch (mmap PLE table; opaque splitting op)
-src/test_ple_mmap_cpu.py   CPU unit test for the gather (no GPU needed)
-scripts/download-weights.sh
-scripts/serve.sh
-scripts/smoke-test.sh
-docs/HOW-IT-WORKS.md
-```
-
-Run the unit test (no GPU):
-
-```bash
-docker run --rm -v "$PWD/src:/t" -w /t --entrypoint python3 \
-  qwen38-flash-dgx test_ple_mmap_cpu.py
-```
-
-## Limitations & notes
-
-- **One big model at a time.** At `GPU_MEM=0.78` this uses most of the 128 GB pool;
-  don't co-locate another large model.
-- **`--no-enable-prefix-caching` is required** (a GB10 GDN kernel bug corrupts on the
-  cached-block path) and **full `torch.compile` is off** (an Inductor int64-indexing
-  assert on sm_121); the serve script sets both. See the doc for why.
-- Decode is a touch slower than the GGUF without MTP, because the gather does one
-  host↔device sync per step; MTP more than makes up for it. A pinned-buffer path to
-  remove that sync is a natural next optimization (PRs welcome).
-- **Weights are not included** and the checkpoint carries Qwen's license (with a
-  MAU/revenue clause) — review it before production use.
-
-## Credits
-
-- Model: **Qwen team, Alibaba** — Qwen3.8-Flash-Next.
-- NVFP4 checkpoint: **[RadixArk/Qwen3.8-Flash-Next-NVFP4](https://huggingface.co/RadixArk/Qwen3.8-Flash-Next-NVFP4)**.
-- Serving engine and base image: **vLLM** (`vllm/vllm-openai:qwen38-flash-next`,
-  the `release/qwen38next` recipe / PR #53896).
-- The mmap-PLE patch and the GB10 serving recipe in this repo: see [LICENSE](LICENSE) (Apache-2.0).
+Previous documentation is in [docs/LEGACY-NVFP4.md](docs/LEGACY-NVFP4.md);
+its launcher is `runtime/run-nvfp4-legacy.sh`. Its old ports, lane counts and
+build instructions do **not** describe the selected production profile.
